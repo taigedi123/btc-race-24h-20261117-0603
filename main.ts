@@ -1,26 +1,28 @@
-// Dip-and-ride: a long-only CBBTC bot for agent-fun/bars-replay/v1.
+// Dip-and-ride v2: a long-only CBBTC bot for agent-fun/bars-replay/v1.
 //
-// The dev window is a flat, choppy market (1-minute noise ~6 bps, a full-size
-// round trip costs ~26 bps), so frequent trading bleeds fees and every
-// short-horizon trend / mean-reversion / breakout rule tested lost money.
-// What works is rare, patient, full-size swing trades:
+// Variant of the submitted "dip-and-ride" entry (dev net PnL +$22.35), with
+// two exit changes, both validated on the dev window plus 24 rotations of
+// it, the time-reversed window and a 120-sample block bootstrap:
 //
-//   - Buy the dip: when the close falls 60 bps below the window's opening
-//     close, buy with all cash. A 60 bps dip is far outside the 1-minute
-//     noise, so the entry only fires on a real intraday drawdown.
-//   - Ride with a trailing stop: exit when the close falls 80 bps below the
-//     highest close since entry; once the position is up 100 bps, tighten
-//     the trail to 40 bps, so a rally that turns is banked instead of given
-//     back. Re-entering needs the price to have recovered above the opening
-//     close first, plus a 30-bar cooldown, so a falling market cannot make
-//     the bot buy dip after dip.
-//   - Do not buy a dip inside a steep fall: if the 240-bar return is below
-//     -120 bps the market is trending down, not dipping.
-//   - Fallback: if nothing has traded by bar 960 and the price is 50 bps
-//     above the open with a positive 240-bar return, buy anyway, so a
-//     window that only rises still produces a trade (the guardrails need
-//     at least one). No entries after bar 1320: too little time left to
-//     earn the round-trip cost back.
+//   1. Take-profit: sell as soon as the close is 160 bps above the entry
+//      close. A rally that runs +160 bps is banked on the way up instead of
+//      waiting for the trailing stop to fire on the way down after the peak.
+//      On the dev window both round trips exit through this rule.
+//   2. The trailing stop tightens later and harder: 30 bps once the
+//      position is up 150 bps (was 40 bps once up 100 bps). It is only a
+//      backstop behind the take-profit; on the dev window it never fires
+//      before the take-profit does.
+//
+// Everything else is unchanged from the submitted entry: buy the dip
+// (60 bps below the window's opening close, full size), re-enter only after
+// the price has recovered above the open plus a 30-bar cooldown, skip a dip
+// inside a steep 240-bar fall, a late fallback entry so a rising-only
+// window still produces a trade, and no entries after bar 1320.
+//
+// The dev window is a flat, choppy market (1-minute noise ~6 bps, a
+// full-size round trip costs ~26 bps), so frequent trading bleeds fees and
+// every short-horizon trend / mean-reversion / breakout rule tested lost
+// money. What works is rare, patient, full-size swing trades.
 //
 // All decisions are exact integer (bigint) comparisons on closes, so two
 // runs produce byte-identical action logs. No randomness, no clock, no
@@ -35,9 +37,11 @@ const DIP_BPS = 60n;
 /** Trailing stop: exit this far below the highest close since entry. */
 const STOP_BPS = 80n;
 /** Once the position is up this far from entry, tighten the trail. */
-const TIGHT_AT_BPS = 100n;
+const TIGHT_AT_BPS = 150n;
 /** The tightened trailing stop. */
-const TIGHT_BPS = 40n;
+const TIGHT_BPS = 30n;
+/** Take-profit: sell as soon as the close is this far above the entry close. */
+const TAKE_PROFIT_BPS = 160n;
 /** Bars to wait after an exit before a new entry. */
 const COOLDOWN_BARS = 30;
 /** Downtrend filter: skip a dip-buy when the return over this many bars is below FILTER_BPS. */
@@ -116,7 +120,13 @@ await runBars({
       return [];
     }
 
-    // Holding: trail the peak; tighten once comfortably in profit.
+    // Holding: bank a strong rally on the way up; otherwise trail the peak,
+    // tightening once comfortably in profit.
+    if (entryPx !== null && close * BPS >= entryPx * (BPS + TAKE_PROFIT_BPS)) {
+      armed = false;
+      lastExit = n;
+      return [{ side: 'sell', symbol: SYMBOL, qty: held.qty, max_slippage_bps: MAX_SLIPPAGE_BPS } satisfies SellInput];
+    }
     if (peak === null || close > peak) peak = close;
     let stop = STOP_BPS;
     if (entryPx !== null && close * BPS > entryPx * (BPS + TIGHT_AT_BPS)) stop = TIGHT_BPS;
